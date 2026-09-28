@@ -1,0 +1,329 @@
+// Inventory page: live stock per warehouse from MySQL (inventory_db) via the API.
+// Small helpers are copied from products.js / dashboard.js so this page works on its own.
+
+// Backend API base URL (Express server in /backend)
+const API_BASE = "http://localhost:3000";
+
+let allInventory = [];
+let inventoryLoaded = false;
+
+async function fetchJSON(path) {
+  const response = await fetch(API_BASE + path);
+  if (!response.ok) {
+    throw new Error("Request failed: " + path + " (" + response.status + ")");
+  }
+  return response.json();
+}
+
+function escapeHtml(value) {
+  return String(value === null || value === undefined ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatNumber(value) {
+  return value.toLocaleString("en-IN");
+}
+
+function formatMoney(value) {
+  return "₹" + formatNumber(value);
+}
+
+function renderToday() {
+  const node = document.getElementById("today-label");
+  const now = new Date();
+  node.dateTime = now.toISOString().slice(0, 10);
+  node.textContent = now.toLocaleDateString("en-IN", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+}
+
+// ---------- Inventory table ----------
+
+// Per-warehouse status: Low when quantity at this warehouse <= reorder level.
+// (The Products page instead compares the product's total across warehouses.)
+function isLowRow(row) {
+  return (Number(row.quantity) || 0) <= (Number(row.reorder_level) || 0);
+}
+
+function inventoryStatusBadge(row) {
+  return isLowRow(row)
+    ? '<span class="status status-pending">Low</span>'
+    : '<span class="status status-received">In stock</span>';
+}
+
+function setTableMessage(message) {
+  const body = document.getElementById("inventory-table");
+  body.innerHTML = `<tr><td class="empty-row" colspan="10">${escapeHtml(message)}</td></tr>`;
+}
+
+function renderSummary() {
+  const summary = document.getElementById("inventory-summary");
+  const chip = document.getElementById("inventory-low-chip");
+  const warehouses = new Set(allInventory.map((row) => row.warehouse_id));
+  const lowCount = allInventory.filter(isLowRow).length;
+
+  if (summary) {
+    summary.textContent =
+      allInventory.length + (allInventory.length === 1 ? " record" : " records") +
+      " · " + warehouses.size + (warehouses.size === 1 ? " warehouse" : " warehouses") +
+      " · live from inventory_db";
+  }
+  if (chip) {
+    chip.textContent = lowCount + " low stock";
+  }
+}
+
+function renderInventory(query) {
+  if (!inventoryLoaded) return;
+
+  const body = document.getElementById("inventory-table");
+  const q = (query || "").trim().toLowerCase();
+
+  if (!allInventory.length) {
+    setTableMessage("No inventory records found.");
+    return;
+  }
+
+  const rows = allInventory.filter((row) =>
+    `${row.product_name || ""} ${row.sku || ""} ${row.category_name || ""} ${row.warehouse_name || ""} ${row.city || ""}`
+      .toLowerCase()
+      .includes(q)
+  );
+
+  if (!rows.length) {
+    setTableMessage("No matching inventory records.");
+    return;
+  }
+
+  body.innerHTML = rows
+    .map(
+      (row) => `
+        <tr>
+          <td>${escapeHtml(row.product_name)}</td>
+          <td>${escapeHtml(row.sku)}</td>
+          <td>${escapeHtml(row.category_name || "—")}</td>
+          <td>${escapeHtml(row.warehouse_name)}${row.city ? " · " + escapeHtml(row.city) : ""}</td>
+          <td>${escapeHtml(formatNumber(Number(row.quantity) || 0))}</td>
+          <td>${escapeHtml(formatNumber(Number(row.reserved_quantity) || 0))}</td>
+          <td>${escapeHtml(formatNumber(Math.max(0, Number(row.available) || 0)))}</td>
+          <td>${escapeHtml(formatNumber(Number(row.reorder_level) || 0))}</td>
+          <td>${inventoryStatusBadge(row)}</td>
+          <td>${escapeHtml(row.last_updated || "—")}</td>
+        </tr>
+      `
+    )
+    .join("");
+}
+
+function currentQuery() {
+  const input = document.getElementById("inventory-search");
+  return input ? input.value : "";
+}
+
+async function loadInventoryPage() {
+  setTableMessage("Loading inventory…");
+
+  try {
+    const rows = await fetchJSON("/api/inventory");
+    allInventory = Array.isArray(rows) ? rows : [];
+    inventoryLoaded = true;
+    renderSummary();
+    renderInventory(currentQuery());
+  } catch (error) {
+    console.error("Error loading inventory:", error);
+    inventoryLoaded = false;
+    setTableMessage("Could not load inventory. Is the backend running?");
+    const summary = document.getElementById("inventory-summary");
+    if (summary) summary.textContent = "Inventory unavailable";
+  }
+}
+
+function setupSearch() {
+  const input = document.getElementById("inventory-search");
+  if (!input) return;
+  input.addEventListener("input", () => {
+    renderInventory(input.value);
+  });
+}
+
+function setupSidebar() {
+  const sidebar = document.getElementById("sidebar");
+  const overlay = document.getElementById("overlay");
+  const toggle = document.getElementById("menu-toggle");
+  const banner = document.getElementById("page-banner");
+  const links = document.querySelectorAll(".nav-link");
+
+  function closeMenu() {
+    sidebar.classList.remove("is-open");
+    overlay.hidden = true;
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.setAttribute("aria-label", "Open navigation menu");
+  }
+
+  function openMenu() {
+    sidebar.classList.add("is-open");
+    overlay.hidden = false;
+    toggle.setAttribute("aria-expanded", "true");
+    toggle.setAttribute("aria-label", "Close navigation menu");
+  }
+
+  toggle.addEventListener("click", () => {
+    if (sidebar.classList.contains("is-open")) {
+      closeMenu();
+    } else {
+      openMenu();
+    }
+  });
+
+  overlay.addEventListener("click", closeMenu);
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeMenu();
+    }
+  });
+
+  window.addEventListener("resize", () => {
+    if (window.innerWidth > 900) {
+      closeMenu();
+    }
+  });
+
+  links.forEach((link) => {
+    link.addEventListener("click", (event) => {
+      const page = link.dataset.page;
+
+      // Live pages navigate normally; others are not built yet.
+      if (!["Dashboard", "Products", "Inventory", "Suppliers", "Purchases"].includes(page)) {
+        event.preventDefault();
+        banner.removeAttribute("hidden");
+        banner.textContent =
+          "The " + page + " page is not built yet. Dashboard, Products, Inventory, Suppliers and Purchases show live data from inventory_db.";
+      }
+
+      closeMenu();
+    });
+  });
+}
+
+// Header warehouse label: "All warehouses (N)" or the single warehouse name.
+// Keeps the existing text if the request fails or returns nothing.
+async function loadWarehouseLabel() {
+  const label = document.getElementById("warehouse-label");
+  if (!label) return;
+
+  try {
+    const warehouses = await fetchJSON("/api/dashboard/warehouses");
+    if (!Array.isArray(warehouses) || !warehouses.length) return;
+
+    if (warehouses.length === 1) {
+      const w = warehouses[0];
+      label.textContent = w.warehouse_name + (w.city ? ", " + w.city : "");
+    } else {
+      label.textContent = "All warehouses (" + warehouses.length + ")";
+    }
+  } catch (error) {
+    console.warn("Warehouses unavailable:", error);
+  }
+}
+
+// ---------- Live database connection indicator (sidebar footer) ----------
+
+const DB_STATUS_POLL_MS = 30000;
+const DB_STATUS_TEXT = {
+  "connected": "Live data · inventory_db",
+  "db-offline": "Database offline · check MySQL",
+  "server-offline": "Server offline · start backend",
+};
+
+let dbStatusState = null;
+let dbStatusChecking = false;
+
+function renderDbStatus(state, detail) {
+  const wrap = document.getElementById("db-status");
+  const text = document.getElementById("db-status-text");
+  const dot = wrap ? wrap.querySelector(".db-dot") : null;
+  if (!wrap || !text) return;
+
+  text.textContent = DB_STATUS_TEXT[state];
+
+  if (dot) {
+    dot.classList.remove("is-connected", "is-db-offline", "is-server-offline");
+    dot.classList.add("is-" + state);
+  }
+
+  const checked = new Date().toLocaleTimeString("en-IN");
+  wrap.title = "Last checked: " + checked + (detail ? " · " + detail : "");
+}
+
+async function checkDbStatus() {
+  if (dbStatusChecking) return;
+  dbStatusChecking = true;
+
+  let state;
+  let detail = "";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const response = await fetch(API_BASE + "/api/dashboard/db-status", {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    let body = {};
+    try {
+      body = await response.json();
+    } catch (parseError) {
+      body = {};
+    }
+
+    if (response.ok && body.database === "connected") {
+      state = "connected";
+      detail = body.db ? "database " + body.db : "";
+    } else if (response.status === 503 || body.database === "disconnected") {
+      state = "db-offline";
+      detail = body.error || "HTTP " + response.status;
+    } else {
+      state = "server-offline";
+      detail = "HTTP " + response.status;
+    }
+  } catch (error) {
+    state = "server-offline";
+    detail = error.name === "AbortError" ? "request timed out" : "backend not reachable";
+  } finally {
+    clearTimeout(timer);
+    dbStatusChecking = false;
+  }
+
+  renderDbStatus(state, detail);
+
+  // Only log when the state changes, to avoid console spam while polling.
+  if (state !== dbStatusState) {
+    if (state !== "connected") {
+      console.warn("Dashboard connection status:", DB_STATUS_TEXT[state], detail ? "(" + detail + ")" : "");
+    } else if (dbStatusState !== null) {
+      console.info("Dashboard connection restored:", DB_STATUS_TEXT[state]);
+    }
+    dbStatusState = state;
+  }
+}
+
+function setupDbStatus() {
+  checkDbStatus();
+  setInterval(checkDbStatus, DB_STATUS_POLL_MS);
+  window.addEventListener("focus", checkDbStatus);
+}
+
+renderToday();
+setupSearch();
+setupSidebar();
+loadInventoryPage();
+loadWarehouseLabel();
+setupDbStatus();
